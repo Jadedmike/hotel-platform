@@ -8,6 +8,26 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_dev_pw
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: "postgresql://app_user:app_user_dev_pw_only@localhost:5432/hotel?schema=public"
+      MIGRATE_DATABASE_URL: "postgresql://migrator:migrator_dev_pw_only@localhost:5432/hotel?schema=public"
+      ADMIN_DATABASE_URL: "postgresql://platform_admin:platform_admin_dev_pw_only@localhost:5432/hotel?schema=public"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,5 +50,19 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Test
+      - name: Unit tests
         run: pnpm test
+
+      - name: Initialize PostgreSQL roles, database, and extensions
+        env:
+          PGPASSWORD: postgres_dev_pw
+        run: |
+          for f in docker/postgres/init/*.sql; do
+            psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Run Prisma migrations
+        run: pnpm db:migrate
+
+      - name: Run SQL-level DB isolation and constraint tests
+        run: pnpm test:db
