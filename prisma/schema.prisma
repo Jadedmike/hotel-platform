@@ -1,7 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
+// Multi-Tenant Hotel Platform — Prisma Schema (SRS v1.1)
+// Shared database, shared schema, tenantId (UUID) + forced Postgres RLS.
 
 generator client {
   provider = "prisma-client"
@@ -10,4 +8,306 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+// ============================================================================
+// Platform Tables (no tenantId)
+// ============================================================================
+
+model Tenant {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name            String
+  slug            String       @unique
+  status          TenantStatus @default(ACTIVE) // ONLY status field (no isActive)
+  suspendedReason String?
+  suspendedAt     DateTime?
+  graceEndsAt     DateTime?
+  terminatedAt    DateTime?
+  purgeAfter      DateTime?
+  plan            String       @default("starter")
+  timezone        String       @default("UTC")
+  currency        String       @default("USD")
+  branding        Json
+  sessionVersion  Int          @default(1)
+  createdAt       DateTime     @default(now())
+
+  domains       Domain[]
+  roomTypes     RoomType[]
+  rooms         Room[]
+  rateOverrides RateOverride[]
+  bookings      Booking[]
+  bookingEvents BookingEvent[]
+  memberships   Membership[]
+  staffInvites  StaffInvite[]
+  auditLogs     AuditLog[]
+  outboxEvents  OutboxEvent[]
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+model User {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String    @unique // Always stored lowercase
+  passwordHash String
+  createdAt    DateTime  @default(now())
+  disabledAt   DateTime?
+
+  memberships Membership[]
+  sentInvites StaffInvite[]
+}
+
+model PlatformAuditLog {
+  id        String   @id @default(cuid())
+  actor     String
+  actorId   String?
+  action    String
+  before    Json?
+  after     Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ============================================================================
+// Tenant-Owned Tables (must match TENANT_MODELS + forced RLS in migrations)
+// ============================================================================
+
+model Domain {
+  id          String       @id @default(cuid())
+  tenantId    String       @db.Uuid
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  host        String
+  isCanonical Boolean      @default(false)
+  status      DomainStatus @default(PENDING)
+  providerRef String?
+  verifiedAt  DateTime?
+  expiresAt   DateTime?
+  lastError   String?
+  createdAt   DateTime     @default(now())
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, host])
+  @@index([tenantId])
+  @@index([host])
+}
+
+enum DomainStatus {
+  PENDING
+  VERIFIED
+  FAILED
+}
+
+model RoomType {
+  id            String   @id @default(cuid())
+  tenantId      String   @db.Uuid
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  bedConfig     String
+  maxAdults     Int
+  maxChildren   Int      @default(0)
+  amenities     String[]
+  baseRateMinor Int
+
+  rooms         Room[]
+  rateOverrides RateOverride[]
+  bookings      Booking[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Room {
+  id         String       @id @default(cuid())
+  tenantId   String       @db.Uuid
+  tenant     Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roomTypeId String
+  roomType   RoomType     @relation(fields: [tenantId, roomTypeId], references: [tenantId, id])
+  number     String
+  opStatus   RoomOpStatus @default(AVAILABLE)
+
+  bookings Booking[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, number])
+  @@index([tenantId])
+  @@index([tenantId, roomTypeId])
+}
+
+enum RoomOpStatus {
+  AVAILABLE
+  OCCUPIED
+  MAINTENANCE
+}
+
+model RateOverride {
+  id         String   @id @default(cuid())
+  tenantId   String   @db.Uuid
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roomTypeId String
+  roomType   RoomType @relation(fields: [tenantId, roomTypeId], references: [tenantId, id], onDelete: Cascade)
+  startDate  DateTime @db.Date
+  endDate    DateTime @db.Date // Exclusive
+  rateMinor  Int
+  createdAt  DateTime @default(now())
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@index([tenantId, roomTypeId, startDate, endDate])
+}
+
+model Booking {
+  id                 String        @id @default(cuid())
+  tenantId           String        @db.Uuid
+  tenant             Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  kind               BookingKind   @default(GUEST)
+  reference          String
+  roomTypeId         String
+  roomType           RoomType      @relation(fields: [tenantId, roomTypeId], references: [tenantId, id])
+  roomId             String
+  room               Room          @relation(fields: [tenantId, roomId], references: [tenantId, id])
+  checkIn            DateTime      @db.Date // Hotel-local date
+  checkOut           DateTime      @db.Date // Exclusive
+  adults             Int           @default(1)
+  children           Int           @default(0)
+  status             BookingStatus @default(PENDING)
+  holdExpiresAt      DateTime?
+  guestName          String?
+  guestEmail         String?
+  guestPhone         String?
+  specialRequests    String?
+  totalMinor         Int           @default(0)
+  currency           String
+  cancellationPolicy Json?
+  paymentStatus      PaymentStatus @default(NONE)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  events BookingEvent[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, reference])
+  @@index([tenantId])
+  @@index([tenantId, checkIn])
+  @@index([tenantId, checkOut])
+  @@index([roomId])
+}
+
+enum BookingKind {
+  GUEST
+  BLOCK
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+  EXPIRED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  NONE
+  REQUIRES_PAYMENT
+  DEPOSIT_PAID
+  PAID
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+model BookingEvent {
+  id         String        @id @default(cuid())
+  tenantId   String        @db.Uuid
+  tenant     Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bookingId  String
+  booking    Booking       @relation(fields: [tenantId, bookingId], references: [tenantId, id], onDelete: Cascade)
+  fromStatus BookingStatus
+  toStatus   BookingStatus
+  actorType  String
+  actorId    String?
+  createdAt  DateTime      @default(now())
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@index([tenantId, bookingId])
+}
+
+model Membership {
+  id         String     @id @default(cuid())
+  tenantId   String     @db.Uuid
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId     String     @db.Uuid
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       TenantRole
+  disabledAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+enum TenantRole {
+  TENANT_ADMIN
+  TENANT_STAFF
+}
+
+model StaffInvite {
+  id              String     @id @default(cuid())
+  tenantId        String     @db.Uuid
+  tenant          Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email           String
+  role            TenantRole
+  tokenHash       String     @unique
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdByUserId String     @db.Uuid
+  createdBy       User       @relation(fields: [createdByUserId], references: [id])
+  createdAt       DateTime   @default(now())
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@index([tenantId, email])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  action    String
+  actor     String
+  actorId   String?
+  before    Json?
+  after     Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+}
+
+model OutboxEvent {
+  id          String    @id @default(cuid())
+  tenantId    String    @db.Uuid
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type        String
+  payload     Json
+  availableAt DateTime  @default(now())
+  processedAt DateTime?
+  attempts    Int       @default(0)
+  lastError   String?
+  createdAt   DateTime  @default(now())
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@index([processedAt, availableAt])
 }
