@@ -9,10 +9,13 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "format": "prettier --write .",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/db/**",
+    "test:db": "vitest run tests/db",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d --wait",
+    "db:migrate": "prisma migrate deploy",
+    "db:generate": "prisma generate",
     "db:check": "tsx scripts/db-check.ts"
   },
   "dependencies": {
