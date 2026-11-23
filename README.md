@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Multi-Tenant Hotel Platform (SaaS / WaaS)
 
-## Getting Started
+A cloud-based, multi-tenant hotel management and booking platform built on Next.js App Router, Prisma, and PostgreSQL. Each hotel operates as an autonomous tenant with its own storefront (`{slug}.platform.com` or verified custom domain), room inventory, pricing, branding, and reservations — served by one codebase and one deployment.
 
-First, run the development server:
+## Architecture in One Picture
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```text
+Request (Host: www.acme.com)
+  -> proxy.ts: strip client x-tenant-* headers -> normalize host
+  -> resolve tenant from KV (+10 s in-memory cache)        // never Prisma here
+  -> unknown host? 404 · non-canonical host? 308 to canonical
+  -> SUSPENDED? 503 page (allow-listed guest paths only) · TERMINATED? 410
+  -> set x-tenant-id; rewrite pages to /[tenantId]/..., pass /api/* through with header
+  -> server code: dbForTenant(tenantId) (app filter) + Postgres RLS (DB filter)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Prerequisites
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- **Node.js** 20.19+ / 22.12+ / 24+ (tested on v26)
+- **pnpm** 10+
+- **Docker Desktop** (for local PostgreSQL 17 and Redis 7)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Quick Start
 
-## Learn More
+```bash
+# 1. Install dependencies
+pnpm install
 
-To learn more about Next.js, take a look at the following resources:
+# 2. Create local environment file (already created during scaffold; otherwise copy)
+cp .env.example .env
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+# 3. Start PostgreSQL 17 and Redis 7 containers
+pnpm db:up
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+# 4. Verify DB roles (app_user, migrator, platform_admin), btree_gist, and Redis PING
+pnpm db:check
 
-## Deploy on Vercel
+# 5. Start the Next.js development server
+pnpm dev
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Open `http://localhost:3000`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Useful Scripts
+
+- `pnpm lint` — run ESLint
+- `pnpm typecheck` — generate Next.js route types and run `tsc --noEmit`
+- `pnpm test` — run Vitest unit/integration tests
+- `pnpm format` — format files with Prettier
+- `pnpm db:up` / `pnpm db:down` / `pnpm db:reset` — manage local Docker Postgres & Redis
+- `pnpm db:check` — verify DB role privileges, `btree_gist` extension, and Redis connectivity
+
+## Delivery Phases
+
+- **Phase 1 (Core Multi-Tenancy, Isolation & Hotel Operations):**
+  - `FR-01` (Tenant lifecycle & immutable UUID), `FR-02.1–02.3` (Subdomain slugs & branding), `FR-03` (Auth, RBAC, MFA, revocation), `FR-04` (Inventory, pricing, booking engine, holds, lifecycle, guest self-service), `FR-06.4` (Suspended storefront 503 & read-only guest booking view), `FR-07` (Timezone, currency, i18n), `FR-08` (Immutable audit logging)
+  - `NFR-01` (Scoped Prisma client + forced Postgres RLS + non-owner `app_user`), `NFR-02` (Sub-30ms tenant resolution & Postgres exclusion constraint for double-booking prevention), `NFR-03` (Rate limiting & per-tenant quotas)
+- **Phase 2 (Custom Domains, Payments, Billing, Lifecycle & Production Hardening):**
+  - `FR-02.4` (Custom domains & SSL), `FR-05` (Guest payments & refunds), `FR-06.1–06.3` (Subscription plans & billing webhooks), `FR-09` (Data export, termination purge, PII anonymization), `FR-10.2` (Audited Super Admin support access)
+  - `NFR-04` to `NFR-08` (Availability/PITR, observability/alerts, scale targets, compliance/GDPR/PCI, WCAG 2.1 AA)
