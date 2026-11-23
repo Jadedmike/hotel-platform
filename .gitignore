@@ -27,3 +27,5 @@ yarn-error.log*
 Thumbs.db
 *.tsbuildinfo
 next-env.d.ts
+
+/app/generated/prisma
